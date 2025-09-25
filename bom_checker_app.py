@@ -6,7 +6,11 @@ from collections import Counter
 st.title("🔍 BOM Data Quality Checker")
 
 # Upload Excel file
-uploaded_file = st.file_uploader("Upload BOM Excel file", type=["xls","xlsx"])
+# Check file extension
+if uploaded_file.name.endswith('.xls'):
+    df = pd.read_excel(uploaded_file, skiprows=6, engine='xlrd')
+else:  # .xlsx
+    df = pd.read_excel(uploaded_file, skiprows=6, engine='openpyxl')
 
 if uploaded_file is not None:
     df = pd.read_excel(uploaded_file, skiprows=6)
@@ -57,3 +61,4 @@ if uploaded_file is not None:
 
     with open(output_file, "rb") as f:
         st.download_button("📥 Download Excel Report", f, file_name="bom_results.xlsx")
+
