@@ -1,139 +1,150 @@
 import streamlit as st
 import pandas as pd
 import re
-from collections import Counter
+from collections import defaultdict
 
-st.title("🔍 BOM Data Quality Checker")
+st.title("📊 Automated BOM Data Quality Checker")
 
-# Upload Excel file
-uploaded_file = st.file_uploader("Upload BOM Excel file", type=["xls","xlsx"])
+# -----------------------------
+# 1️⃣ Upload BOM Excel file
+# -----------------------------
+uploaded_file = st.file_uploader("Upload BOM Excel file", type=["xls", "xlsx"])
 
 if uploaded_file is not None:
-    # Determine engine based on file extension
+    # Read Excel file with appropriate engine
     if uploaded_file.name.endswith('.xls'):
-        df = pd.read_excel(uploaded_file, skiprows=6, engine='xlrd')
+        df_raw = pd.read_excel(uploaded_file, skiprows=6, engine='xlrd')
     else:
-        df = pd.read_excel(uploaded_file, skiprows=6, engine='openpyxl')
+        df_raw = pd.read_excel(uploaded_file, skiprows=6, engine='openpyxl')
 
     st.success("✅ File uploaded successfully!")
-    st.subheader("Preview of Data")
-    st.dataframe(df.head())
+    st.subheader("Preview of Raw Data")
+    st.dataframe(df_raw.head())
 
     # -----------------------------
-    # 1️⃣ Check unique Subject Numbers
+    # 2️⃣ Select Required Columns
     # -----------------------------
-    subject_duplicates = df[df.duplicated('Subject number', keep=False)]
-    if subject_duplicates.empty:
+    required_columns = ["Level", "Subject number", "Manufacturer number", "Number", "Item text"]
+    selected_columns = [col for col in required_columns if col in df_raw.columns]
+    df = df_raw[selected_columns].copy()
+
+    # Filter only alphanumeric Subject Numbers
+    df_alphanumeric = df[df['Subject number'].str.contains(r'\d', na=False)].copy()
+
+    # -----------------------------
+    # 3️⃣ Check duplicate Subject Numbers
+    # -----------------------------
+    duplicates = df_alphanumeric[df_alphanumeric['Subject number'].duplicated(keep=False)]
+    if duplicates.empty:
         subject_unique_result = "Yes"
-        st.success("All Subject Numbers are unique ✅")
     else:
         subject_unique_result = "No"
-        st.error("Duplicate Subject Numbers found ❌")
-        st.dataframe(subject_duplicates)
 
     # -----------------------------
-    # 2️⃣ Subject Numbers with missing Manufacturer number
+    # 4️⃣ Subjects with Number = 0
     # -----------------------------
-    missing_manufacturer = df[df['Manufacturer number'].isna() | (df['Manufacturer number'].astype(str).str.strip()=='')]
-    if missing_manufacturer.empty:
-        missing_manufacturer_result = "No"
-        st.success("No missing Manufacturer numbers ✅")
-    else:
-        missing_manufacturer_result = "Yes"
-        st.warning("Subject Numbers with missing Manufacturer number ❌")
-        st.dataframe(missing_manufacturer[['Subject number','Manufacturer number']])
-
-    # -----------------------------
-    # 3️⃣ Number = 0
-    # -----------------------------
-    zero_number = df[df['Number'] == 0]
+    zero_number = df_alphanumeric[df_alphanumeric['Number'] == 0]
     if zero_number.empty:
         zero_number_result = "No"
-        st.success("No 'Number=0' cases ✅")
     else:
         zero_number_result = "Yes"
-        st.warning("Do not populate (Number=0) ❌")
-        st.dataframe(zero_number[['Subject number','Number']])
 
     # -----------------------------
-    # 4️⃣ Check if Number matches item count
+    # 5️⃣ Check Number vs Item text count
     # -----------------------------
-    def count_items(text):
-        if pd.isna(text) or str(text).strip()=='':
-            return None
-        # Remove prefixes like TOP:, BOTTOM:, BS:, RS:, VS:
-        s = re.sub(r'\b[A-Z]+\s*:\s*','',str(text))
-        items = [i.strip() for i in re.split(r'[,\n;]+', s) if i.strip()]
-        return len(items) if items else 1
+    def count_items(item_text):
+        if pd.isna(item_text) or str(item_text).strip() == "":
+            return "NA"
+        text = str(item_text).strip()
+        # Fully alphabetical -> 1
+        if re.fullmatch(r'[A-Za-z\s]+', text):
+            return 1
+        # Remove prefixes like BS:, VS:, RS:, TOP:, BOTTOM:
+        text_cleaned = re.sub(r'^[A-Z]+:\s*', '', text, flags=re.IGNORECASE)
+        parts = [part.strip() for part in re.split(r',', text_cleaned) if part.strip()]
+        return len(parts)
 
-    df['Item_Count'] = df['Item text'].apply(count_items)
-    number_mismatches = df[df['Item_Count'].notna() & (df['Item_Count'] != df['Number'])]
-    if number_mismatches.empty:
-        number_match_result = "Yes"
-        st.success("All Item text counts match Number column ✅")
-    else:
-        number_match_result = "No"
-        st.error("Number column mismatches found ❌")
-        st.dataframe(number_mismatches[['Subject number','Number','Item text','Item_Count']])
-
-    # -----------------------------
-    # 5️⃣ Item text uniqueness across dataset
-    # -----------------------------
-    all_items = []
-    for text in df['Item text'].dropna():
-        s = re.sub(r'\b[A-Z]+\s*:\s*', '', str(text))
-        items = [i.strip().upper() for i in re.split(r'[,\n;]+', s) if i.strip()]
-        all_items.extend(items)
-
-    dup_items = {i:c for i,c in Counter(all_items).items() if c>1}
-    if not dup_items:
-        item_unique_result = "Yes"
-        st.success("All items in Item text are unique ✅")
-    else:
-        item_unique_result = "No"
-        st.error("Duplicate items found in Item text ❌")
-        st.write(dup_items)
+    df_alphanumeric['Item_Count'] = df_alphanumeric['Item text'].apply(count_items)
+    number_mismatches = df_alphanumeric[
+        (df_alphanumeric['Item_Count'] != df_alphanumeric['Number']) &
+        (df_alphanumeric['Item_Count'] != 'NA')
+    ]
+    number_match_result = "Yes" if number_mismatches.empty else "No"
 
     # -----------------------------
-    # Summary Table
+    # 6️⃣ Check Item text uniqueness across dataset
+    # -----------------------------
+    def get_duplicate_items_with_subjects(df, item_col='Item text', subject_col='Subject number'):
+        item_to_subjects = defaultdict(list)
+        for idx, row in df.iterrows():
+            text = row[item_col]
+            subject = row[subject_col]
+            if pd.isna(text) or str(text).strip() == '':
+                continue
+            s = re.sub(r'\b[A-Z]+\s*:\s*', '', str(text), flags=re.IGNORECASE)
+            items = [i.strip().upper() for i in re.split(r'[,\n;]+', s) if i.strip()]
+            for item in items:
+                item_to_subjects[item].append(subject)
+        duplicates = {item: subjects for item, subjects in item_to_subjects.items() if len(subjects) > 1}
+        if not duplicates:
+            return pd.DataFrame(), "Yes"
+        else:
+            duplicate_rows = []
+            for item, subjects in duplicates.items():
+                for sub in subjects:
+                    duplicate_rows.append({'Item': item, 'Subject number': sub})
+            return pd.DataFrame(duplicate_rows), "No"
+
+    duplicate_items_df, item_unique_result = get_duplicate_items_with_subjects(df_alphanumeric)
+
+    # -----------------------------
+    # 7️⃣ Check missing Manufacturer numbers
+    # -----------------------------
+    missing_manufacturer_df = df_alphanumeric[
+        df_alphanumeric['Manufacturer number'].isna() |
+        (df_alphanumeric['Manufacturer number'].astype(str).str.strip() == "")
+    ]
+    missing_manufacturer_result = "No" if missing_manufacturer_df.empty else "Yes"
+
+    # -----------------------------
+    # 8️⃣ Summary Table
     # -----------------------------
     summary = pd.DataFrame({
         "Check": [
             "All Subject Numbers unique",
-            "Missing Manufacturer number",
-            "Number = 0",
+            "Subjects with Number=0",
             "Number matches Item text count",
-            "All items in Item text unique"
+            "All items in Item text unique",
+            "Missing Manufacturer numbers"
         ],
         "Result": [
             subject_unique_result,
-            missing_manufacturer_result,
             zero_number_result,
             number_match_result,
-            item_unique_result
+            item_unique_result,
+            missing_manufacturer_result
         ]
     })
 
-    st.subheader("✅ Summary")
+    st.subheader("📄 Summary")
     st.dataframe(summary)
 
     # -----------------------------
-    # Download Excel Report
+    # 9️⃣ Download Clean Excel Report
     # -----------------------------
-    output_file = "bom_check_results.xlsx"
+    output_file = "bom_quality_report.xlsx"
     with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name="Original Data", index=False)
-        if not subject_duplicates.empty:
-            subject_duplicates.to_excel(writer, sheet_name="Duplicate Subjects", index=False)
-        if not missing_manufacturer.empty:
-            missing_manufacturer.to_excel(writer, sheet_name="Missing Manufacturer", index=False)
+        summary.to_excel(writer, sheet_name="Summary", index=False)
+        if not duplicates.empty:
+            duplicates.to_excel(writer, sheet_name="Duplicate Subjects", index=False)
         if not zero_number.empty:
             zero_number.to_excel(writer, sheet_name="Number Zero Cases", index=False)
         if not number_mismatches.empty:
             number_mismatches.to_excel(writer, sheet_name="Number Mismatches", index=False)
-        if dup_items:
-            dup_df = pd.DataFrame(list(dup_items.items()), columns=["Item","Count"])
-            dup_df.to_excel(writer, sheet_name="Duplicate Items", index=False)
+        if not duplicate_items_df.empty:
+            duplicate_items_df.to_excel(writer, sheet_name="Duplicate Items", index=False)
+        if not missing_manufacturer_df.empty:
+            missing_manufacturer_df.to_excel(writer, sheet_name="Missing Manufacturer", index=False)
 
     with open(output_file, "rb") as f:
-        st.download_button("📥 Download Excel Report", f, file_name="bom_results.xlsx")
+        st.download_button("📥 Download Clean Excel Report", f, file_name="bom_quality_report.xlsx")
